@@ -1,0 +1,17 @@
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+TOKEN = os.getenv("BOT_TOKEN")
+LKS_TOKEN = os.getenv("LKS_TOKEN")
+DB_PATH = os.getenv("DB_PATH", "nntu_bot.db")
+
+GROUP_CODE = "26-ИВТ-2-1"
+GROUP_TITLE = "26-ИВТ-2-1"
+VALID_SUBGROUPS = (1, 2, 3)
+
+URL_MAIN_IMG = "AgACAgIAAxkBAAMZasDzBJuAgLGhzPdq-7yENXgMXY8AAjEfaxvQvwlK86DDD5NG3bIBAAMCAAN5AAM9BA"
+URL_SCHED_IMG = "AgACAgIAAxkBAAMbasDzBM1ULMLRh7ezDvFDl4FfkXoAAjIfaxvQvwlKSsSbxESU4c0BAAMCAAN5AAM9BA"
+URL_DEAD_IMG = "AgACAgIAAxkBAAMVasDymhTJaBQF71Qo2mg7vGiBF-cAAi4faxvQvwlKrsFSP5v998QBAAMCAAN4AAM9BA"

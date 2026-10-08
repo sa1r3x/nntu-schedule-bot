@@ -1,0 +1,5 @@
+.env
+nntu_bot.db
+code.zip
+__pycache__/
+.venv/
