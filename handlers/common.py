@@ -23,7 +23,7 @@ SETTINGS_TEXT = (
     "Нажми кнопку своей подгруппы. Расписание общее для всей группы, "
     "а дедлайны по лабам будут только твои."
 )
-
+LAB_MESSAGES: dict[int, list[int]] = {}
 DAYS_MAP = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
 
 
@@ -54,6 +54,12 @@ async def delete_old_menu(bot, chat_id: int, user_id: int, extra_message_id: int
         except Exception:
             logger.debug("Не удалось удалить сообщение %s", message_id)
 
+async def clear_lab_messages(bot, chat_id: int, user_id: int) -> None:
+    for message_id in LAB_MESSAGES.pop(user_id, []):
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            logger.debug("Не удалось удалить сообщение лабы %s", message_id)
 
 async def send_main_menu(message: types.Message, subgroup: int) -> None:
     sent = await message.answer_photo(
@@ -101,3 +107,27 @@ async def require_subgroup(callback: types.CallbackQuery) -> int | None:
         reply_markup=get_subgroup_markup(),
     )
     return None
+
+import asyncio
+from aiogram import Router
+from aiogram.types import Message
+from aiogram.filters import StateFilter
+from aiogram.exceptions import TelegramBadRequest
+
+# Этот роутер мы будем импортировать
+router = Router()
+
+@router.message(StateFilter("*"))
+async def trap_and_delete_user_messages(message: Message):
+    if message.text and message.text.startswith("/"):
+        return
+
+    try:
+        await message.delete()
+        warning = await message.answer("⚠️ **Используйте только инлайн-кнопки меню!**")
+        await asyncio.sleep(3)
+        await warning.delete()
+    except TelegramBadRequest:
+        pass
+    except Exception as e:
+        print(f"Ошибка ловушки: {e}")

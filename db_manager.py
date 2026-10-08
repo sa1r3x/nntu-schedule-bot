@@ -222,32 +222,88 @@ def get_completed_lab_ids(user_id: int) -> set[int]:
         return {row[0] for row in cursor.fetchall()}
 
 
-def get_visible_deadlines(user_id: int, subgroup: int, horizon_days: int = 14) -> list[dict]:
-    """Лабы подгруппы до +horizon_days и все несданные прошлые (долги). Сданные скрыты навсегда."""
+def get_semester_start(today: datetime.date | None = None) -> datetime.date:
+    """1 сентября текущего учебного года."""
+    today = today or datetime.date.today()
+    year = today.year if today.month >= 9 else today.year - 1
+    return datetime.date(year, 9, 1)
+
+
+def get_lab_status(
+    due_iso: str,
+    is_done: bool,
+    today: datetime.date | None = None,
+    horizon_days: int = 14,
+) -> str | None:
+    """
+    Возвращает состояние лабы для пользователя:
+      "debt"     - не сдана, дедлайн уже прошёл          -> 🔴
+      "upcoming" - не сдана, дедлайн в ближайшие N дней  -> ⏳
+      "done"     - сдана, дедлайн ещё не наступил        -> 🟢
+      None       - лаба скрыта (сдана и дедлайн наступил/прошёл, либо слишком далёкое будущее)
+    """
+    today = today or datetime.date.today()
+    due = datetime.date.fromisoformat(str(due_iso)[:10])
+    if is_done:
+        return "done" if due > today else None
+    if due < today:
+        return "debt"
+    if due <= today + datetime.timedelta(days=horizon_days):
+        return "upcoming"
+    return None
+
+
+def get_lab_by_id(lab_id: int) -> dict | None:
     init_db()
-    horizon = datetime.date.today() + datetime.timedelta(days=horizon_days)
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, lab_name, due_iso, room, subgroup FROM labs WHERE id = ?",
+            (lab_id,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_visible_deadlines(user_id: int, subgroup: int, horizon_days: int = 14) -> list[dict]:
+    """
+    Все лабы подгруппы с 1 сентября учебного года, которые нужно показать пользователю.
+    К каждой лабе добавляются поля: status ("debt" / "upcoming" / "done") и is_done.
+    """
+    init_db()
+    today = datetime.date.today()
+    semester_start = get_semester_start(today)
+    completed = get_completed_lab_ids(user_id)
+
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT l.id, l.lab_name, l.due_iso, l.room, l.subgroup
-            FROM labs l
-            WHERE (l.subgroup = ? OR l.subgroup IS NULL)
-              AND l.due_iso <= ?
-              AND l.id NOT IN (
-                  SELECT lab_id FROM user_completed_labs WHERE user_id = ?
-              )
-            ORDER BY l.due_iso ASC
-        """, (subgroup, horizon.isoformat(), user_id))
+            SELECT id, lab_name, due_iso, room, subgroup
+            FROM labs
+            WHERE (subgroup = ? OR subgroup IS NULL)
+              AND due_iso >= ?
+            ORDER BY due_iso ASC, lab_name ASC
+        """, (subgroup, semester_start.isoformat()))
         rows = cursor.fetchall()
-        logger.info(
-            "Видимые дедлайны user_id=%s subgroup=%s horizon=%s: %s шт.",
-            user_id,
-            subgroup,
-            horizon.isoformat(),
-            len(rows),
-        )
-        return [dict(row) for row in rows]
+
+    result = []
+    for row in rows:
+        item = dict(row)
+        is_done = item["id"] in completed
+        status = get_lab_status(item["due_iso"], is_done, today, horizon_days)
+        if status is None:
+            continue
+        item["status"] = status
+        item["is_done"] = is_done
+        result.append(item)
+
+    logger.info(
+        "Видимые лабы user_id=%s subgroup=%s с %s: %s из %s",
+        user_id, subgroup, semester_start.isoformat(), len(result), len(rows),
+    )
+    return result
 
 
 def get_active_deadlines(user_id: int, subgroup: int | None = None):

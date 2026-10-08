@@ -40,6 +40,7 @@ class NNTUParser:
     def __init__(self):
         self.base_url = "https://lks-api.nntu.ru"
         self._token_status_logged = False
+        self._synced_weeks: set[datetime.date] = set()
 
     def _lks_token(self) -> str:
         token = (os.getenv("LKS_TOKEN") or "").strip().strip('"').strip("'")
@@ -176,49 +177,52 @@ class NNTUParser:
             return f"🎉 <b>В день ({str(target_day).upper()}) пар нет! Отдыхай.</b>"
         return output
 
-    def get_deadlines_for_subgroup(self, subgroup: int, user_id: int | None = None) -> list[dict]:
+    def sync_semester_labs(self, horizon_days: int = 14) -> int:
+        """Скачивает все недели с 1 сентября до today+horizon_days и кладёт лабы в таблицу labs."""
         today = datetime.date.today()
-        horizon = today + datetime.timedelta(days=7)
-        all_days = self.fetch_week_data(today) + self.fetch_week_data(today + datetime.timedelta(days=7))
-        if not all_days:
-            logger.warning("Дедлайны: обе недели пустые, подгруппа=%s", subgroup)
-            return []
+        semester_start = db.get_semester_start(today)
+        end = today + datetime.timedelta(days=horizon_days)
+        current_monday = today - datetime.timedelta(days=today.weekday())
+        week = semester_start - datetime.timedelta(days=semester_start.weekday())
+        saved = 0
 
-        labs: list[dict] = []
-        for day in all_days:
-            due_date = self._parse_day_date(day)
-            if due_date is None or due_date < today or due_date > horizon:
+        while week <= end:
+            is_past = week < current_monday
+            if is_past and week in self._synced_weeks:
+                week += datetime.timedelta(days=7)
                 continue
-            lessons = day.get("lessonElements") or []
-            for lesson in lessons:
-                if not self._is_lab(lesson):
-                    continue
-                lesson_groups = self._lesson_subgroups(lesson)
-                if lesson_groups is not None and subgroup not in lesson_groups:
-                    logger.debug(
-                        "Пропуск чужой лабы %s (подгруппы %s, нужна %s)",
-                        lesson.get("subject"),
-                        lesson_groups,
-                        subgroup,
-                    )
-                    continue
-                subject = str(lesson.get("subject") or "").strip()
-                if not subject:
-                    continue
-                room = lesson.get("room") or "—"
-                labs.append({
-                    "lab_name": subject,
-                    "due_date": due_date.strftime("%d.%m"),
-                    "due_iso": due_date.isoformat(),
-                    "room": room,
-                    "subgroup": subgroup,
-                })
-                if user_id:
-                    db.add_auto_deadline(user_id, subject, due_date.strftime("%d.%m"), room, subgroup)
 
-        labs.sort(key=lambda item: item["due_iso"])
-        logger.info("Дедлайны подгруппы %s на неделю вперёд: %s шт.", subgroup, len(labs))
-        return labs
+            days = self.fetch_week_data(week)
+            if days:
+                for day in days:
+                    due_date = self._parse_day_date(day, reference=week)
+                    if due_date is None or due_date < semester_start or due_date > end:
+                        continue
+                    for lesson in day.get("lessonElements") or []:
+                        if not self._is_lab(lesson):
+                            continue
+                        subject = str(lesson.get("subject") or "").strip()
+                        if not subject:
+                            continue
+                        room = lesson.get("room") or "—"
+                        groups = self._lesson_subgroups(lesson)
+                        targets = sorted(groups) if groups else [None]
+                        for group_no in targets:
+                            db.upsert_lab(subject, due_date.isoformat(), room, group_no)
+                            saved += 1
+                if is_past:
+                    self._synced_weeks.add(week)
+            week += datetime.timedelta(days=7)
+
+        logger.info("Синхронизация лаб с %s по %s: %s записей", semester_start, end, saved)
+        return saved
+
+    def get_deadlines_for_subgroup(self, subgroup: int, user_id: int | None = None) -> list[dict]:
+        try:
+            self.sync_semester_labs()
+        except Exception:
+            logger.exception("Не удалось обновить лабы из ЛК, показываем то, что уже есть в БД")
+        return db.get_visible_deadlines(user_id or 0, subgroup)
 
     def _week_schedule(self, is_next_week: bool, user_id=None) -> list:
         today = datetime.date.today()
@@ -247,7 +251,8 @@ class NNTUParser:
                     for group_no in groups:
                         db.add_auto_deadline(user_id, subject, due_date.strftime("%d.%m"), room, group_no)
 
-    def _parse_day_date(self, day: dict) -> datetime.date | None:
+    def _parse_day_date(self, day: dict, reference: datetime.date | None = None) -> datetime.date | None:
+        reference = reference or datetime.date.today()
         raw_title = str(day.get("dayOfTheWeek") or "").strip()
         if "," in raw_title:
             try:
@@ -257,11 +262,14 @@ class NNTUParser:
                 if not month_num:
                     logger.warning("Неизвестный месяц в заголовке дня: %r", raw_title)
                     return None
-                year = datetime.date.today().year
-                parsed = datetime.date(year, month_num, int(day_num))
-                if parsed.month == 1 and datetime.date.today().month == 12:
-                    parsed = datetime.date(year + 1, month_num, int(day_num))
-                return parsed
+                candidates = []
+                for year in (reference.year - 1, reference.year, reference.year + 1):
+                    try:
+                        candidates.append(datetime.date(year, month_num, int(day_num)))
+                    except ValueError:
+                        continue
+                if candidates:
+                    return min(candidates, key=lambda c: abs((c - reference).days))
             except Exception:
                 logger.exception("Не разобрали дату из заголовка %r", raw_title)
         for key in ("date", "dayDate", "lessonDate"):
